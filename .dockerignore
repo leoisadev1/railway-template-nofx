@@ -1,0 +1,6 @@
+.git
+.github
+.railway
+STATUS.md
+*.md
+!README.md

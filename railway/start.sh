@@ -1,5 +1,6 @@
 #!/bin/sh
 set -eu
+umask 077
 
 export PORT="${PORT:-8080}"
 export DB_TYPE="${DB_TYPE:-sqlite}"
@@ -9,10 +10,37 @@ export TZ="${TZ:-UTC}"
 mkdir -p /app/data
 chmod 700 /app/data
 
-if [ -z "${JWT_SECRET:-}" ]; then
+if [ -z "${JWT_SECRET:-}" ] || [ "${#JWT_SECRET}" -lt 32 ]; then
   echo "JWT_SECRET is required (set a 32+ character secret)" >&2
   exit 1
 fi
+
+if [ -z "${SETUP_PASSWORD:-}" ] || [ "${#SETUP_PASSWORD}" -lt 16 ]; then
+  echo "SETUP_PASSWORD is required (set a 16+ character secret)" >&2
+  exit 1
+fi
+case "$SETUP_PASSWORD" in
+  *[!a-zA-Z0-9_-]*)
+    echo "SETUP_PASSWORD must contain only letters, digits, underscores or hyphens" >&2
+    exit 1
+    ;;
+esac
+
+# Invalidate all prior sessions when the backend process is started again.
+BOOT_NONCE="$(openssl rand -hex 32)"
+JWT_SECRET="$(printf '%s:%s' "$JWT_SECRET" "$BOOT_NONCE" | openssl dgst -sha256)"
+JWT_SECRET="${JWT_SECRET##* }"
+[ "${#JWT_SECRET}" -eq 64 ] || exit 1
+export JWT_SECRET
+unset BOOT_NONCE
+
+# nginx workers need read access to the hash, never the setup password.
+mkdir -p /run/nofx-auth
+chmod 755 /run/nofx-auth
+SETUP_HASH="$(printf '%s' "$SETUP_PASSWORD" | openssl passwd -6 -stdin)"
+printf 'setup:%s\n' "$SETUP_HASH" > /run/nofx-auth/registration.htpasswd
+chmod 644 /run/nofx-auth/registration.htpasswd
+unset SETUP_PASSWORD SETUP_HASH
 
 # Persist RSA across restarts so browser transport keys stay valid.
 if [ -z "${RSA_PRIVATE_KEY:-}" ]; then
@@ -53,6 +81,15 @@ server {
         proxy_set_header Host \$host;
         proxy_connect_timeout 2s;
         proxy_read_timeout 5s;
+    }
+
+    location ~ ^/api/register/?$ {
+        auth_basic "NOFX owner setup";
+        auth_basic_user_file /run/nofx-auth/registration.htpasswd;
+        proxy_pass http://127.0.0.1:8081;
+        proxy_set_header Host \$host;
+        proxy_set_header Authorization "";
+        proxy_set_header X-Real-IP \$remote_addr;
     }
 
     location /api/ {

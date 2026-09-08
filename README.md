@@ -1,96 +1,63 @@
 # Deploy and Host NOFX on Railway
 
-Self-hosted [NOFX](https://github.com/NoFxAiOS/nofx) AI trading terminal: SQLite on a volume at `/app/data`, a real `/health` check, and a generated JWT secret.
+Self-hosted [NOFX](https://github.com/NoFxAiOS/nofx) with a persistent SQLite volume, backend healthcheck, protected owner registration, and restart-invalidated sessions. Backend, frontend, and Alpine image digests are pinned in the Dockerfile.
 
-NOFX is an open-source terminal where a language model proposes trades and a Go runtime enforces hard risk limits. This listing is a one-service deploy of the official all-in-one Railway image shape (backend binary + frontend static files + nginx), pinned by digest.
-
-**Do not place real trades from a throwaway deploy.** Automated trading can lose money. Size positions yourself, keep exchange keys off shared machines, and never fund an instance you do not control.
+**Do not attach real funds or credentials based on deployment tests.** Automated trading can lose money. No real trading, deposits, funded wallets, or model/exchange credentials are covered by the audit.
 
 ## About Hosting NOFX
 
-The container runs the Go API on port `8081` and nginx on Railway `PORT`. SQLite lives at `/app/data/data.db` on a persistent volume. Railway healthchecks `GET /health`, which nginx proxies to `/api/health`.
+One container runs nginx on port `8080` and the Go backend internally on `8081`. SQLite, RSA, and fallback AES key material live on `/app/data`. Railway checks `GET /health`, which proxies to the backend's `/api/health`.
 
-First boot: open the public URL and register. That account becomes the instance owner; later registration is rejected with `System already initialized`. Autopilot stays off until you start it. This template does not place trades on its own.
+The startup wrapper requires a setup password and protects **only** `/api/register` (including its trailing-slash form) with nginx HTTP Basic authentication. Other APIs retain their normal Bearer-token authentication. The backend port must never receive a public domain or TCP proxy; publish nginx only.
 
-Source: [leoisadev1/railway-template-nofx](https://github.com/leoisadev1/railway-template-nofx), based on [NoFxAiOS/nofx@638d404](https://github.com/NoFxAiOS/nofx/commit/638d4042118995fbf1a38d3822b1139aa3c6b467) (`Dockerfile.railway`).
+Each startup derives a new effective JWT signing key from the private JWT seed and fresh random entropy. **All sessions expire on restart/redeploy; log in again.** SQLite, RSA and data-encryption keys are not rotated. Use one replica and the supplied startup wrapper, not the backend binary directly.
 
-## Why Deploy
+## First setup and login
 
-The popular marketplace `nofx` card (health 68) points at upstream but ships neither the `/app/data` volume nor a wired `/health` check. This template:
+1. Set the required variables below and mount `/app/data` before starting. Missing or invalid `SETUP_PASSWORD` fails closed before nginx/backend launch.
+2. Open the Railway HTTPS domain and fill in the owner email and account password.
+3. When registration prompts for **NOFX owner setup**, use HTTP username **`setup`** and the generated **`SETUP_PASSWORD`** from Railway variables. This is separate from your account password. Browsers may cache this HTTP credential; use a private browser context on shared devices.
+4. Complete owner registration. Subsequent registration remains setup-gated and the backend rejects additional owners with `System already initialized`.
+5. On later visits or after restart, sign in with the owner email/account password. Normal login does not require the setup password. Do not paste the setup password into API Bearer headers.
 
-- Pins `ghcr.io/nofxaios/nofx/nofx-backend` and `nofx-frontend` **and** `alpine:3.22` by digest (no floating `:latest`)
-- Mounts a volume at `/app/data` for SQLite, logs, and persisted RSA/AES keys
-- Sets Railway `healthcheckPath = /health` (proxied to the Go `/api/health` endpoint)
-- Generates `JWT_SECRET` and `DATA_ENCRYPTION_KEY` with `${{secret()}}` on each new deploy
-- Documents first-boot owner lock
-
-## Common Use Cases
-
-- Self-host the NOFX dashboard without cloning an empty GitHub repo
-- Keep SQLite and encryption keys across Railway redeploys
-- Paper-trade or testnet an AI trader before attaching live exchange keys
-
-## Dependencies for NOFX Hosting
-
-- One Railway service built from this Dockerfile (GHCR backend + frontend layers, alpine 3.22)
-- Volume mounted at `/app/data`
-- Public HTTPS domain (nginx)
-- Generated `JWT_SECRET` (32+ characters) and `DATA_ENCRYPTION_KEY`
-
-No exchange API keys or model keys are required to boot the UI. Add those in the app after you register.
-
-### Deployment Dependencies
-
-| Piece | Pin / value | Notes |
-| --- | --- | --- |
-| Backend image | `ghcr.io/nofxaios/nofx/nofx-backend:latest@sha256:f781904f35b8235053ecc0c9e213bb1d6b2dd11514a72a8121ca20e161b0ab06` | Recorded 2026-09-07 |
-| Frontend image | `ghcr.io/nofxaios/nofx/nofx-frontend:latest@sha256:889335c1f1f21a2bb60cb25dbf5a3ab5d688d4a9639a4cf20d7f352515f5c71d` | Recorded 2026-09-07 |
-| Runtime | `alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce` | Multi-arch index |
-| Volume | `/app/data` | SQLite `data.db` + RSA PEM |
-| Healthcheck | `GET /health` | Timeout 120s |
-| Upstream commit | `638d4042118995fbf1a38d3822b1139aa3c6b467` | NoFxAiOS/nofx `dev` 2026-09-05 |
-
-## After deploy
-
-1. Open the public HTTPS URL Railway assigns to the `nofx` service.
-2. Register the first account (email + password, 8+ characters). That user is the instance owner. Registration then locks.
-3. Follow the in-app launch guide: add an AI model (your own API key, or Claw402 USDC metering) and an exchange. **Paper / testnet first.**
-4. Autopilot is optional and off until you start it.
-
-`GET /health` returns the backend JSON `{"status":"ok"}` once nginx and the Go API are up.
+Keep the setup secret private. It proves permission to attempt owner registration, not ownership of an already initialized account. Anyone holding it can participate in initial setup. A populated volume may contain existing trader configuration; it is not necessarily inert. The app may automatically generate an **unfunded** wallet during onboarding without the operator making a deposit.
 
 ## Variables
 
-| Variable | Required | Default | Notes |
-| --- | --- | --- | --- |
-| `JWT_SECRET` | yes | `${{secret()}}` | HS256 signing key, 32+ characters. Generated per deploy. |
-| `DATA_ENCRYPTION_KEY` | yes | `${{secret()}}` | AES key for credentials at rest. Generated per deploy. Changing it makes stored exchange keys unreadable. |
-| `DB_TYPE` | no | `sqlite` (image ENV) | Keep sqlite unless you attach your own Postgres. |
-| `DB_PATH` | no | `/app/data/data.db` (image ENV) | Must stay on the volume. |
-| `TZ` | no | `UTC` (image ENV) | Container timezone. |
-| `TRANSPORT_ENCRYPTION` | no | unset (false) | Set `true` only if you want browser-side API-key encryption (HTTPS already terminates at Railway). |
-| `RSA_PRIVATE_KEY` | no | generated on first boot, saved to `/app/data/rsa_private_key.pem` | PEM. Leave empty; the start script persists it on the volume. |
+| Variable | Required/default | Purpose |
+| --- | --- | --- |
+| `SETUP_PASSWORD` | Required; proposed template generates `${{secret()}}` | At least 16 letters, digits, `_` or `-`; HTTP Basic username is `setup`. Never used for wallet encryption. |
+| `JWT_SECRET` | Required, 32+ characters; `${{secret()}}` | Private seed combined with fresh 256-bit random entropy on each startup. Effective session-signing key is not persisted. |
+| `DATA_ENCRYPTION_KEY` | Listing generates independent `${{secret()}}` | Keep stable with the volume. Upstream accepts/normalizes encoded key material; an audited 32-character Base64 value decoded to 24 bytes (AES-192). Do not rotate it to invalidate sessions. |
+| `RSA_PRIVATE_KEY` | Optional; generated/persisted if omitted | RSA-2048 PEM at `/app/data/rsa_private_key.pem`; not rotated on restart. |
+| `TRANSPORT_ENCRYPTION` | Optional, false | `true` enables browser-side credential transport encryption in addition to HTTPS. |
+| `PORT` | `8080` | nginx/public HTTP port; do not expose backend `8081`. |
+| `DB_TYPE` / `DB_PATH` | `sqlite` / `/app/data/data.db` | Keep the database on the volume. |
+| `TZ` | `UTC` | Container timezone. |
 
-Optional market-data keys (`ALPACA_API_KEY`, `ALPACA_SECRET_KEY`, `TWELVEDATA_API_KEY`) stay empty. Add them in the dashboard if you need those feeds.
+If `DATA_ENCRYPTION_KEY` is omitted, startup generates Base64 of 32 random bytes and persists it at `/app/data/data_encryption_key`. Back up the database and its stable encryption material together.
 
-## Volume and port
+**Existing deployments:** set `SETUP_PASSWORD` before updating to this wrapper. The old published template configuration does not yet supply it; the parent must apply `proposed-config.json`. Source deployment and marketplace configuration publication are separate operations.
 
-- Volume mount: `/app/data` (SQLite + encryption material)
-- HTTP: Railway `PORT` (nginx). Backend listens on `8081` inside the container and is not public.
-- Healthcheck: `GET /health` (timeout 120s)
+## Common Use Cases
 
-Redeploys keep the owner account, strategies, and encrypted exchange credentials as long as the volume and `DATA_ENCRYPTION_KEY` stay put.
+- Evaluate the dashboard with a synthetic account and no trading keys.
+- Retain owner/configuration data through restarts while invalidating all old sessions.
+- Run a single-user instance with a separate owner-setup credential.
 
-## Login / owner lock
+## Dependencies for NOFX Hosting
 
-There is no default user. On a fresh volume:
+- One service built from this Dockerfile and a persistent `/app/data` volume.
+- HTTPS domain targeting nginx port `8080` only; one replica.
+- Required setup password and JWT seed; stable data-encryption material.
+- No model or exchange key is needed for health, owner login, or inactive configuration tests.
 
-1. Open the site and register.
-2. The first successful `POST /api/register` creates the owner.
-3. Further registration is rejected with `System already initialized`.
+### Deployment Dependencies
 
-If you need a new owner, wipe the volume (you will lose the SQLite database). There is no implicit credential adoption after a reset.
+[Template source](https://github.com/leoisadev1/railway-template-nofx) wraps pinned official GHCR backend/frontend artifacts. The source reference inspected for routes and JWT use is [NoFxAiOS/nofx@638d404](https://github.com/NoFxAiOS/nofx/commit/638d4042118995fbf1a38d3822b1139aa3c6b467). The Dockerfile retains all existing digest pins. Railway health timeout is 120 seconds.
 
-## Risk
+## Validation and limits
 
-This is self-hosted trading software (AGPL-3.0). The template does not include exchange API keys, does not enable Autopilot, and does not fund wallets. You are responsible for keys, balances, and venue rules. See upstream [DISCLAIMER.md](https://github.com/NoFxAiOS/nofx/blob/dev/DISCLAIMER.md).
+Run `python3 tests/test_start.py` for local startup regression tests. They exercise setup fail-closed behavior, registration-only gate generation, fresh session keys, and stable RSA/AES material without starting a local server. Cloud/browser evidence and exact tested source revisions are recorded in the parent audit, not inferred from a healthy deployment.
+
+Restart invalidation deliberately trades session continuity for fail-closed revocation. This wrapper does not implement persistent individual-token revocation or change upstream password-reset/session semantics. Financial execution, exchange risk controls, concurrent authorized setup, multi-replica sessions, and funded-wallet recovery are outside these tests. NOFX is AGPL-3.0 software; see its upstream disclaimer before any financial use.

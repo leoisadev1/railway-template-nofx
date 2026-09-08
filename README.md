@@ -26,7 +26,7 @@ Keep the setup secret private. It proves permission to attempt owner registratio
 
 | Variable | Required/default | Purpose |
 | --- | --- | --- |
-| `SETUP_PASSWORD` | Required; proposed template generates `${{secret()}}` | At least 16 letters, digits, `_` or `-`; HTTP Basic username is `setup`. Never used for wallet encryption. |
+| `SETUP_PASSWORD` | Required; template generates `${{secret()}}` | At least 16 letters, digits, `_` or `-`; HTTP Basic username is `setup`. Never used for wallet encryption. |
 | `JWT_SECRET` | Required, 32+ characters; `${{secret()}}` | Private seed combined with fresh 256-bit random entropy on each startup. Effective session-signing key is not persisted. |
 | `DATA_ENCRYPTION_KEY` | Listing generates independent `${{secret()}}` | Keep stable with the volume. Upstream accepts/normalizes encoded key material; an audited 32-character Base64 value decoded to 24 bytes (AES-192). Do not rotate it to invalidate sessions. |
 | `RSA_PRIVATE_KEY` | Optional; generated/persisted if omitted | RSA-2048 PEM at `/app/data/rsa_private_key.pem`; not rotated on restart. |
@@ -37,7 +37,7 @@ Keep the setup secret private. It proves permission to attempt owner registratio
 
 If `DATA_ENCRYPTION_KEY` is omitted, startup generates Base64 of 32 random bytes and persists it at `/app/data/data_encryption_key`. Back up the database and its stable encryption material together.
 
-**Existing deployments:** set `SETUP_PASSWORD` before updating to this wrapper. The old published template configuration does not yet supply it; the parent must apply `proposed-config.json`. Source deployment and marketplace configuration publication are separate operations.
+**Existing deployments:** set a valid `SETUP_PASSWORD` in the service variables before updating to this wrapper. New template deployments generate it automatically, but updating a template listing does not add variables to existing instances. Keep `DATA_ENCRYPTION_KEY` and the volume unchanged. Every restart invalidates all sessions; sign in again with the owner account password.
 
 ## Common Use Cases
 
@@ -58,6 +58,8 @@ If `DATA_ENCRYPTION_KEY` is omitted, startup generates Base64 of 32 random bytes
 
 ## Validation and limits
 
-Run `python3 tests/test_start.py` for local startup regression tests. They exercise setup fail-closed behavior, registration-only gate generation, fresh session keys, and stable RSA/AES material without starting a local server. Cloud/browser evidence and exact tested source revisions are recorded in the parent audit, not inferred from a healthy deployment.
+Run `python3 tests/test_start.py` for the seven local startup regression tests. They exercise setup fail-closed behavior, registration-only gate generation, fresh session keys, and stable RSA/AES material without starting a local server.
+
+Executable revision `5033202222decb2560ee20703ec3d92364a74ade` also passed controlled Railway tests: missing/wrong setup credentials were rejected, owner registration and login worked in a real browser, Bearer APIs remained usable, and both logged-out and previously active tokens were rejected after restart. Fresh login, inactive configuration, and stable RSA/data-encryption material were verified afterward, with zero traders. Browser automation's global Basic-header override was cleared after registration before testing normal login; native desktop/phone authentication dialogs were not manually tested. These checks used no real model/exchange keys, trades, deposits or funding.
 
 Restart invalidation deliberately trades session continuity for fail-closed revocation. This wrapper does not implement persistent individual-token revocation or change upstream password-reset/session semantics. Financial execution, exchange risk controls, concurrent authorized setup, multi-replica sessions, and funded-wallet recovery are outside these tests. NOFX is AGPL-3.0 software; see its upstream disclaimer before any financial use.

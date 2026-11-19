@@ -4,3 +4,5 @@
 STATUS.md
 *.md
 !README.md
+node_modules
+audit

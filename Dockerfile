@@ -2,16 +2,19 @@
 # Reuses official GHCR backend + frontend bits (same shape as upstream
 # Dockerfile.railway) but pins every layer by digest.
 #
-# Upstream: NoFxAiOS/nofx@638d4042118995fbf1a38d3822b1139aa3c6b467 (dev, 2026-09-05)
-# GHCR latest digests recorded 2026-09-07.
+# Upstream: NoFxAiOS/nofx@65e9037b452707c216d9746ea2c942fd1843badc (dev, 2026-11-04)
+# GHCR latest index digests recorded 2026-11-19 (image label main-amd64).
+# The backend binary is built on Alpine 3.24, so the runtime uses 3.24 too.
 
-FROM ghcr.io/nofxaios/nofx/nofx-backend:latest@sha256:f781904f35b8235053ecc0c9e213bb1d6b2dd11514a72a8121ca20e161b0ab06 AS backend
+FROM ghcr.io/nofxaios/nofx/nofx-backend:latest@sha256:de852567df3c260c9d8b4d050b92308fa48563004909d629d97fd3224e1319dc AS backend
 
-FROM ghcr.io/nofxaios/nofx/nofx-frontend:latest@sha256:889335c1f1f21a2bb60cb25dbf5a3ab5d688d4a9639a4cf20d7f352515f5c71d AS frontend
+FROM ghcr.io/nofxaios/nofx/nofx-frontend:latest@sha256:407ebafec2991c02212ea3b2167a2dbb5b6ff27217f52cbdf7dea9d60d0e3be9 AS frontend
 
-FROM alpine:3.22@sha256:14358309a308569c32bdc37e2e0e9694be33a9d99e68afb0f5ff33cc1f695dce
+FROM alpine:3.24@sha256:f59abe656b692d901e184be3445e084786602108599d2a51d229c0f5a48c71bf
 
-RUN apk add --no-cache ca-certificates tzdata sqlite nginx openssl wget
+RUN apk add --no-cache ca-certificates tzdata sqlite nginx openssl wget setpriv \
+  && addgroup -S -g 10001 nofx \
+  && adduser -S -D -H -u 10001 -G nofx -h /app -s /sbin/nologin nofx
 
 COPY --from=backend /app/nofx /app/nofx
 COPY --from=backend /usr/local/lib/libta_lib* /usr/local/lib/
@@ -20,10 +23,11 @@ RUN ldconfig /usr/local/lib 2>/dev/null || true
 COPY --from=frontend /usr/share/nginx/html /usr/share/nginx/html
 
 WORKDIR /app
-RUN mkdir -p /app/data
+RUN mkdir -p /app/data && chown nofx:nofx /app/data && chmod 700 /app/data
 
 COPY railway/start.sh /app/start.sh
-RUN chmod +x /app/start.sh
+COPY railway/serve.sh /app/serve.sh
+RUN chmod 755 /app/start.sh /app/serve.sh
 
 ENV DB_TYPE=sqlite \
     DB_PATH=/app/data/data.db \
@@ -31,7 +35,12 @@ ENV DB_TYPE=sqlite \
 
 EXPOSE 8080
 
-HEALTHCHECK --interval=30s --timeout=10s --start-period=60s --retries=3 \
-  CMD wget --no-verbose --tries=1 --spider http://127.0.0.1:${PORT:-8080}/health || exit 1
+# No HEALTHCHECK: Docker would run it as root next to the unprivileged
+# processes, and Railway ignores it in favour of railway.toml's /health check.
+# Probe http://<host>:<port>/health from outside the container instead.
 
+# start.sh runs as root only to hand the volume to the nofx user and write
+# nginx's root-owned config, then replaces itself with serve.sh under setpriv
+# (UID 10001, no supplementary groups, empty capability bounding set,
+# no_new_privs). No root process remains.
 CMD ["/app/start.sh"]

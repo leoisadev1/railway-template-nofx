@@ -17,10 +17,14 @@ export TZ="${TZ:-UTC}"
 # model-usage events to Google Analytics unless this is false. Opt in by
 # setting it to true.
 export EXPERIENCE_IMPROVEMENT="${EXPERIENCE_IMPROVEMENT:-false}"
-# Proxies whose X-Forwarded-For entries nginx believes: Railway's edge only.
-# Other services in the project reach this one from other private addresses
-# and must not be able to choose the client address the login limit uses.
+# Proxies whose X-Real-IP nginx believes: Railway's edge only. Any wider range
+# would let more peers choose the client address the login limit uses.
 EDGE_PROXY_CIDRS="${EDGE_PROXY_CIDRS:-100.64.0.0/10}"
+# Header those proxies carry the client address in. Railway's edge writes
+# X-Real-IP: <client>; its X-Forwarded-For ends with the edge's own public
+# address. X-Forwarded-For (taking the rightmost entry not in EDGE_PROXY_CIDRS)
+# is for a reverse proxy of your own that appends to it and sets no X-Real-IP.
+EDGE_CLIENT_IP_HEADER="${EDGE_CLIENT_IP_HEADER:-X-Real-IP}"
 
 if [ "$(id -u)" -ne 0 ]; then
   echo "start.sh must start as root; it drops to the ${APP_USER} user itself" >&2
@@ -129,6 +133,21 @@ if [ -z "$REAL_IP_FROM" ]; then
   echo "EDGE_PROXY_CIDRS must list at least one CIDR" >&2
   exit 1
 fi
+case "$EDGE_CLIENT_IP_HEADER" in
+  X-Real-IP)
+    REAL_IP_HEADER="    real_ip_header X-Real-IP;
+"
+    ;;
+  X-Forwarded-For)
+    REAL_IP_HEADER="    real_ip_header X-Forwarded-For;
+    real_ip_recursive on;
+"
+    ;;
+  *)
+    echo "EDGE_CLIENT_IP_HEADER must be exactly X-Real-IP (the default, for Railway) or X-Forwarded-For" >&2
+    exit 1
+    ;;
+esac
 
 # Invalidate all prior sessions when the backend process is started again.
 BOOT_NONCE="$(openssl rand -hex 32)"
@@ -172,14 +191,15 @@ http {
     uwsgi_temp_path ${STATE_DIR}/uwsgi;
     scgi_temp_path ${STATE_DIR}/scgi;
 
-    # Take the client address from the rightmost X-Forwarded-For entry not
-    # added by a trusted edge proxy (EDGE_PROXY_CIDRS, Railway's 100.64.0.0/10
-    # by default). Clients and other services cannot choose it, and the
-    # backend keys its login rate limit on it, so one client cannot lock
-    # everyone else out.
-${REAL_IP_FROM}    real_ip_header X-Forwarded-For;
-    real_ip_recursive on;
-
+    # When the TCP peer is a trusted edge proxy (EDGE_PROXY_CIDRS, Railway's
+    # 100.64.0.0/10 by default), take the client address from the header
+    # EDGE_CLIENT_IP_HEADER names, X-Real-IP by default. Railway's edge
+    # discards what the client sent and writes X-Real-IP: <client> and
+    # X-Forwarded-For: <client>, <edge public address>, so the rightmost
+    # untrusted X-Forwarded-For entry would be a shared, rotating edge address,
+    # not the client. Any other peer is the client itself, whatever headers it
+    # sends. The backend keys its login rate limit on this address.
+${REAL_IP_FROM}${REAL_IP_HEADER}
     server {
         listen ${PORT};
         server_name _;
@@ -194,6 +214,8 @@ ${REAL_IP_FROM}    real_ip_header X-Forwarded-For;
             proxy_pass http://127.0.0.1:8081/api/health;
             proxy_http_version 1.1;
             proxy_set_header Host \$host;
+            proxy_set_header X-Real-IP \$remote_addr;
+            proxy_set_header X-Forwarded-For \$remote_addr;
             proxy_connect_timeout 2s;
             proxy_read_timeout 5s;
         }

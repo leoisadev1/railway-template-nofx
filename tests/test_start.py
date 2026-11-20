@@ -112,9 +112,15 @@ class StartupTests(unittest.TestCase):
         general_api = config.split("location /api/ {", 1)[1].split("}\n", 1)[0]
         self.assertNotIn("auth_basic", general_api)
         self.assertNotIn('proxy_set_header Authorization ""', general_api)
-        # The backend trusts the client address nginx sends; nginx must set it.
-        for block in config.split("proxy_pass ")[2:]:
-            self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", block.split("}", 1)[0])
+        # The backend trusts the client address nginx sends; nginx must set it in
+        # every proxied location, /health included, never pass on the client's.
+        blocks = config.split("proxy_pass ")[1:]
+        self.assertEqual(len(blocks), 5)
+        self.assertTrue(blocks[0].startswith("http://127.0.0.1:8081/api/health;"))
+        for block in blocks:
+            body = block.split("}", 1)[0]
+            self.assertIn("proxy_set_header X-Forwarded-For $remote_addr;", body)
+            self.assertIn("proxy_set_header X-Real-IP $remote_addr;", body)
 
     def real_ip_sources(self):
         config = (self.conf / "nginx.conf").read_text()
@@ -124,6 +130,34 @@ class StartupTests(unittest.TestCase):
         result = self.run_start(JWT_SECRET=secrets.token_urlsafe(32))
         self.assertEqual(result.returncode, 0, result.stderr)
         self.assertEqual(self.real_ip_sources(), ["set_real_ip_from 100.64.0.0/10;"])
+
+    def real_ip_directives(self, **variables):
+        result = self.run_start(JWT_SECRET=secrets.token_urlsafe(32), **variables)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        config = (self.conf / "nginx.conf").read_text()
+        return [line.strip() for line in config.splitlines() if line.strip().startswith("real_ip_")]
+
+    def test_client_address_comes_from_the_edge_x_real_ip(self):
+        # Railway's edge sends X-Forwarded-For: <client>, <edge public address>.
+        # Walking that right to left yields the shared edge address, so by default
+        # nginx reads X-Real-IP, which the edge sets to the client, without recursion.
+        self.assertEqual(self.real_ip_directives(), ["real_ip_header X-Real-IP;"])
+        self.assertEqual(self.real_ip_directives(EDGE_CLIENT_IP_HEADER="X-Real-IP"), ["real_ip_header X-Real-IP;"])
+
+    def test_x_forwarded_for_restores_the_recursive_lookup(self):
+        # For a reverse proxy of the operator's own that only appends X-Forwarded-For.
+        self.assertEqual(
+            self.real_ip_directives(EDGE_CLIENT_IP_HEADER="X-Forwarded-For"),
+            ["real_ip_header X-Forwarded-For;", "real_ip_recursive on;"],
+        )
+
+    def test_unknown_client_ip_header_fails_closed(self):
+        for value in ("x-real-ip", "X-Real-IP ", "Forwarded", "X-Forwarded-For; include /etc/passwd", "X-Real-IP\nserver_name x", "*"):
+            with self.subTest(value=value):
+                result = self.run_start(JWT_SECRET=secrets.token_urlsafe(32), EDGE_CLIENT_IP_HEADER=value)
+                self.assertNotEqual(result.returncode, 0, value)
+                self.assertIn("EDGE_CLIENT_IP_HEADER must be exactly X-Real-IP", result.stderr)
+                self.assertFalse((self.conf / "nginx.conf").exists())
 
     def test_edge_proxy_override_accepts_a_cidr_list(self):
         result = self.run_start(JWT_SECRET=secrets.token_urlsafe(32), EDGE_PROXY_CIDRS="10.89.7.10/32, fd12::/16,100.64.0.0/10,2001:db8::1/128,1:2:3:4:5:6:7:8/128,::/1")

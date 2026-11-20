@@ -8,9 +8,9 @@ Self-hosted [NOFX](https://github.com/NoFxAiOS/nofx) with a persistent SQLite vo
 
 One container runs nginx on port `8080` and the Go backend on `127.0.0.1:8081`, reachable only from inside the container. Both run as an unprivileged `nofx` user with no capabilities and `no_new_privs`; the wrapper uses root only at startup to write nginx's configuration and take ownership of the volume. SQLite, RSA, and fallback AES key material live on `/app/data`. Railway checks `GET /health`, which proxies to the backend's `/api/health`.
 
-The startup wrapper requires a setup password and protects `/api/register` (including its trailing-slash form) with nginx HTTP Basic authentication. Upstream's anonymous trader-data endpoints (`/api/traders`, `/api/competition`, `/api/top-traders`, equity history and public trader config) list every trader's name, exchange, equity and PnL by default, so nginx requires a signed-in owner for them; the competition page needs login. Other APIs retain their normal Bearer-token authentication. Publish port `8080` only. Upstream throttles login attempts per client address. nginx believes `X-Forwarded-For` only from Railway's edge range (`100.64.0.0/10`) and takes the last entry the edge did not add, so neither a client nor another service in the project can choose its address to escape the limit.
+The startup wrapper requires a setup password and protects `/api/register` (including its trailing-slash form) with nginx HTTP Basic authentication. Upstream's anonymous trader-data endpoints (`/api/traders`, `/api/competition`, `/api/top-traders`, equity history and public trader config) list every trader's name, exchange, equity and PnL by default, so nginx requires a signed-in owner for them; the competition page needs login. Other APIs retain their normal Bearer-token authentication. Publish port `8080` only. Upstream throttles login attempts per client address (8, then one every 6 seconds). For connections from Railway's edge range (`100.64.0.0/10`), nginx takes the client address from `X-Real-IP`, which the edge sets itself, so each internet client has its own limit and nobody can escape it by forging forwarding headers.
 
-Other services in the same Railway project reach NOFX only through nginx on `8080`, with the same setup gate and login as the public domain.
+Other services in the same Railway project reach NOFX only through nginx on `8080`, with the same setup gate and login as the public domain. Services that connect over the private network also come from `100.64.0.0/10`, so they can set `X-Real-IP` and are not reliably rate-limited; keep untrusted software out of the project.
 
 Upstream's usage telemetry (Google Analytics events for startup, model usage, and each trade's exchange, symbol, USD amount and leverage) is off unless you set `EXPERIENCE_IMPROVEMENT=true`.
 
@@ -36,7 +36,8 @@ Keep the setup secret private. It proves permission to attempt owner registratio
 | `RSA_PRIVATE_KEY` | Optional; generated/persisted if omitted | RSA-2048 PEM at `/app/data/rsa_private_key.pem`; not rotated on restart. |
 | `TRANSPORT_ENCRYPTION` | Optional, false | `true` enables browser-side credential transport encryption in addition to HTTPS. |
 | `EXPERIENCE_IMPROVEMENT` | Optional, false | `true` turns on upstream's usage telemetry to Google Analytics. |
-| `EDGE_PROXY_CIDRS` | Optional, `100.64.0.0/10` | CIDRs whose `X-Forwarded-For` nginx believes for the login rate limit. Leave unset on Railway. |
+| `EDGE_PROXY_CIDRS` | Optional, `100.64.0.0/10` | CIDRs of the reverse proxy whose client-address header nginx believes for the login rate limit. Leave unset on Railway. |
+| `EDGE_CLIENT_IP_HEADER` | Optional, `X-Real-IP` | That header: `X-Real-IP`, or `X-Forwarded-For` for your own proxy that sends no `X-Real-IP`. Leave unset on Railway. |
 | `PORT` | `8080` | nginx/public HTTP port; do not expose backend `8081`. |
 | `DB_TYPE` / `DB_PATH` | `sqlite` / `/app/data/data.db` | Keep the database on the volume. |
 | `TZ` | `UTC` | Container timezone. |
@@ -68,7 +69,7 @@ Railway provides the container, HTTPS routing, generated secrets, and the persis
 
 ## Validation and limits
 
-Run `python3 tests/test_start.py` for the 16 local startup regression tests. They exercise setup fail-closed behavior, registration-only gate generation, fresh session keys, the privilege drop and loopback bind, the telemetry default, the trusted edge range and its validation, and stable RSA/AES material without starting a local server. The container smoke test additionally checks process privileges, the loopback-only backend, the trader-data gate, a login throttle that neighbouring services cannot escape by forging `X-Forwarded-For`, logout, restart invalidation, and an upgrade from a 1.0.x volume.
+Run `python3 tests/test_start.py` for the 19 local startup regression tests. They exercise setup fail-closed behavior, registration-only gate generation, fresh session keys, the privilege drop and loopback bind, the telemetry default, the trusted edge range, the client-address header setting and their validation, and stable RSA/AES material without starting a local server. The container smoke test additionally checks process privileges, the loopback-only backend, the trader-data gate, a per-client login throttle behind a stand-in for Railway's edge that clients cannot escape by forging `X-Forwarded-For` or `X-Real-IP`, logout, restart invalidation, and an upgrade from a 1.0.x volume.
 
 The 1.0.0 wrapper (revision `5033202222decb2560ee20703ec3d92364a74ade`) also passed controlled Railway tests: missing/wrong setup credentials were rejected, owner registration and login worked in a real browser, Bearer APIs remained usable, and both logged-out and previously active tokens were rejected after restart. Fresh login, inactive configuration, and stable RSA/data-encryption material were verified afterward, with zero traders. Browser automation's global Basic-header override was cleared after registration before testing normal login; native desktop/phone authentication dialogs were not manually tested. These checks used no real model/exchange keys, trades, deposits or funding.
 
